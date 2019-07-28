@@ -1,0 +1,15 @@
+[package]
+name = "livox"
+version = "0.1.0"
+authors = ["Lane Kolbly <lane@rscheme.org>"]
+edition = "2018"
+build = "build.rs"
+links = "livox_sdk_static"
+
+[dependencies]
+libc = "0.2.0"
+byteorder = "1.3.1"
+
+[dev-dependencies]
+las = "0.6.2"
+palette = "0.4"
