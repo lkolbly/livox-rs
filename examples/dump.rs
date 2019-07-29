@@ -1,10 +1,8 @@
 use std::time::{Duration, Instant};
-use std::fs::File;
-use std::io::Write;
 use las::{Writer, Point, Color, Builder};
 use las::point::Format;
 
-use livox::*;
+use livox::{Sdk, LidarUpdate, LidarState, LidarMode, DataPoint};
 
 fn main() {
     let mut builder = Builder::from((1, 4));
@@ -12,12 +10,11 @@ fn main() {
     let header = builder.into_header().unwrap();
     let mut las_writer = Writer::from_path("points.las", header).unwrap();
 
-    let (mut s, c) = Scanner::new().unwrap();
+    let (mut s, c) = Sdk::new().unwrap();
     let now = Instant::now();
     while now.elapsed() < Duration::from_millis(20_000) {
         match c.try_recv() {
             Ok(update) => {
-                //println!("{:?}", update);
                 match update {
                     LidarUpdate::Broadcast(code) => {
                         println!("Found device: {}", code);
@@ -38,7 +35,6 @@ fn main() {
                         for point in data.points {
                             match point {
                                 DataPoint::Spherical(p) => {
-                                    //file.write_fmt(format_args!("{},{},{},{}\n", p.depth, p.theta, p.phi, p.reflectivity));
                                     let p = Point{ x: 1.0, y: 1.0, z: 1.0, ..Default::default() };
                                     las_writer.write(p).unwrap();
                                 }
@@ -49,9 +45,15 @@ fn main() {
                                     ]);
                                     let color = grad.get(p.reflectivity as f64 / 100.0);
                                     let rgb = palette::LinSrgb::from(color).into_format::<u16>();
-                                    let p = Point{ x: p.x as f64, y: p.y as f64, z: p.z as f64, intensity: p.reflectivity as u16, color: Some(Color{red: rgb.red, green: rgb.green, blue: rgb.blue}), ..Default::default() };
+                                    let p = Point{
+                                        x: p.x as f64,
+                                        y: p.y as f64,
+                                        z: p.z as f64,
+                                        intensity: p.reflectivity as u16,
+                                        color: Some(Color{red: rgb.red, green: rgb.green, blue: rgb.blue}),
+                                        ..Default::default()
+                                    };
                                     las_writer.write(p).unwrap();
-                                    //file.write_fmt(format_args!("{},{},{},{}\n", p.x, p.y, p.z, p.reflectivity));
                                 }
                             }
                         }
