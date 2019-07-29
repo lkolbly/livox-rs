@@ -1,4 +1,4 @@
-use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::mpsc::{Sender, Receiver, channel, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -26,6 +26,17 @@ pub enum LidarState {
     LidarStateStandBy = 3,
     LidarStateError = 4,
     LidarStateUnknown = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LidarStateMask {
+    Init = 1,
+    Normal = 2,
+    PowerSaving = 4,
+    StandBy = 8,
+    Error = 16,
+    Unknown = 32,
+    Any = 0x1F,
 }
 
 #[repr(C)]
@@ -94,6 +105,7 @@ extern {
     //fn GetConnectedDevices(devices: *mut DeviceInfo, size: *mut u8) -> u8;
     fn SetDataCallback(handle: u8, cb: extern fn(u8, *const LivoxEthPacket, u32));
     fn LidarStartSampling(handle: u8, cb: CommonCommandCallback, client_data: *mut u8) -> u8;
+    fn LidarStopSampling(handle: u8, cb: CommonCommandCallback, client_data: *mut u8) -> u8;
     fn LidarSetMode(handle: u8, mode: LidarMode, cb: CommonCommandCallback, client_data: *mut u8) -> u8;
 }
 
@@ -115,19 +127,15 @@ extern fn broadcast_cb(devinfo: *const BroadcastDeviceInfo) {
 }
 
 lazy_static! {
-    static ref DEVICE_STATE_PIPE: Mutex<Option<Sender<(DeviceInfo, DeviceEvent)>>> = Mutex::new(None);
+    static ref DEVICE_STATES: Mutex<HashMap<u8, LidarState>> = Mutex::new(HashMap::new());
 }
 
 extern fn device_state_update_cb(devinfo: *const DeviceInfo, event: DeviceEvent) {
-    match &*DEVICE_STATE_PIPE.lock().unwrap() {
-        Some(sender) => {
-            let devinfo = unsafe { (*devinfo).clone() };
-            sender.send((devinfo, event)).unwrap();
-        },
-        None => {
-            panic!("Device state pipe not setup but device_state_update_cb called");
-        }
-    }
+    let devinfo = unsafe { (*devinfo).clone() };
+    (*DEVICE_STATES.lock().unwrap()).insert(
+        devinfo.handle,
+        devinfo.state,
+    );
 }
 
 #[derive(Debug)]
@@ -153,10 +161,8 @@ pub enum DataPoint {
 }
 
 pub struct DataPacket {
-    handle: u8,
-    error_code: u32,
-    timestamp: u64,
-    points: Vec<DataPoint>,
+    pub timestamp: u64,
+    pub points: Vec<DataPoint>,
 }
 
 impl DataPacket {
@@ -203,12 +209,17 @@ fn parse_timestamp(data: &[u8]) -> u64 {
     val
 }
 
-lazy_static! {
+/*lazy_static! {
     static ref DATA_PIPE: Mutex<Option<Sender<DataPacket>>> = Mutex::new(None);
+}*/
+
+lazy_static! {
+    static ref DATA_PIPES: Mutex<HashMap<u8, Sender<DataPacket>>> = Mutex::new(HashMap::new());
 }
 
 extern fn data_cb(handle: u8, data: *const LivoxEthPacket, data_size: u32) {
-    match &*DATA_PIPE.lock().unwrap() {
+    //match &*DATA_PIPE.lock().unwrap() {
+    match &(*DATA_PIPES.lock().unwrap()).get(&handle) {
         Some(sender) => {
             let version = unsafe { (*data).version };
             let timestamp_type = unsafe { (*data).timestamp_type };
@@ -227,8 +238,8 @@ extern fn data_cb(handle: u8, data: *const LivoxEthPacket, data_size: u32) {
             };
 
             let mut dp = DataPacket{
-                handle: handle,
-                error_code: err_code,
+                //handle: handle,
+                //error_code: err_code,
                 timestamp: time,
                 points: vec!(),
             };
@@ -245,7 +256,8 @@ extern fn data_cb(handle: u8, data: *const LivoxEthPacket, data_size: u32) {
             sender.send(dp).unwrap();
         }
         None => {
-            panic!("Data pipe not setup but data_cb called!");
+            // This can happen after the data stream is closed
+            //panic!("Data pipe not setup but data_cb called!");
         }
     }
 }
@@ -274,11 +286,110 @@ pub enum LidarUpdate {
     Data(LidarData),
 }
 
+pub struct DataStream {
+    handle: u8,
+    receiver: Receiver<DataPacket>,
+}
+
+impl DataStream {
+    fn new(handle: u8) -> Result<DataStream, ()> {
+        let (sender, receiver) = channel();
+        (*DATA_PIPES.lock().unwrap()).insert(
+            handle.clone(),
+            sender,
+        );
+        unsafe {
+            SetDataCallback(handle, data_cb);
+            LidarStartSampling(handle, common_command_cb, 0 as *mut u8);
+        }
+        Ok(DataStream{
+            handle: handle,
+            receiver: receiver,
+        })
+    }
+}
+
+impl Iterator for DataStream {
+    type Item = DataPacket;
+
+    fn next(&mut self) -> Option<DataPacket> {
+        match self.receiver.try_recv() {
+            Ok(packet) => {
+                Some(packet)
+            }
+            Err(TryRecvError::Empty) => {
+                None
+            }
+            Err(TryRecvError::Disconnected) => {
+                panic!("Received disconnect error in DataStream iterator!");
+            }
+        }
+    }
+}
+
+impl Drop for DataStream {
+    fn drop(&mut self) {
+        unsafe {
+            LidarStopSampling(self.handle, common_command_cb, 0 as *mut u8);
+        }
+
+        (*DATA_PIPES.lock().unwrap()).remove(&self.handle);
+    }
+}
+
+pub struct Device {
+    code: String,
+    handle: u8,
+}
+
+/// Interface for a single Livox device.
+impl Device {
+    fn new(code: String, handle: u8) -> Result<Device, ()> {
+        (*DEVICE_STATES.lock().unwrap()).insert(
+            handle,
+            LidarState::LidarStateUnknown,
+        );
+        Ok(Device{
+            code: code,
+            handle: handle,
+        })
+    }
+
+    /// Blocks until the device reaches a state that's permissible by the given
+    /// mask. Note that it does not time out, so be sure to call set_mode before
+    /// calling this method!
+    pub fn wait_for_state(&mut self, state_mask: LidarStateMask) {
+        loop {
+            let state = match (*DEVICE_STATES.lock().unwrap()).get(&self.handle) {
+                Some(state) => { state.clone() },
+                None => { LidarState::LidarStateUnknown },
+            };
+            if state_mask as u32 & (1 << (state) as u32) != 0 {
+                break;
+            }
+        }
+    }
+
+    /// Sends a command to set the mode of the device. The device state may not
+    /// instantaneously change, be sure to call wait_for_state after calling.
+    pub fn set_mode(&mut self, mode: LidarMode) {
+        let res = unsafe { LidarSetMode(self.handle, mode, common_command_cb, 0 as *mut u8) };
+        // @TODO: Check the result
+    }
+
+    /// Starts sampling. Returns a DataStream which can be used to retrieve data
+    /// points.
+    pub fn start_sampling(&mut self) -> Result<DataStream, ()> {
+        let ds = DataStream::new(self.handle)?;
+        Ok(ds)
+    }
+}
+
 /// Rust-friendly wrapper around the Livox SDK.
 pub struct Sdk {
     handle: Option<JoinHandle<()>>,
     kill: Sender<bool>,
-    connected_devices: Arc<Mutex<HashMap<String, u8>>>,
+    known_devices: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 impl Sdk {
@@ -304,14 +415,8 @@ impl Sdk {
             return Err(());
         }
 
-        let (sender, data_receiver) = channel();
-        *DATA_PIPE.lock().unwrap() = Some(sender);
-
         let (sender, broadcast_receiver) = channel();
         *BROADCAST_PIPE.lock().unwrap() = Some(sender);
-
-        let (sender, device_state_receiver) = channel();
-        *DEVICE_STATE_PIPE.lock().unwrap() = Some(sender);
 
         unsafe {
             SetBroadcastCallback(broadcast_cb);
@@ -321,49 +426,17 @@ impl Sdk {
         // Spin up a thread to process broadcasts and state changes
         let (update_sender, update_receiver) = channel();
 
-        let connected_devices: Arc<Mutex<HashMap<String, u8>>> = Arc::new(Mutex::new(HashMap::new()));
-        let connected_devices_thread = Arc::clone(&connected_devices);
+        let known_devices: Arc<Mutex<HashMap<String, bool>>> = Arc::new(Mutex::new(HashMap::new()));
+        let known_devices_thread = Arc::clone(&known_devices);
+
         let (kill_sender, kill_recv) = channel();
         let handle = thread::spawn(move || {
             loop {
-                match data_receiver.try_recv() {
-                    Ok(v) => {
-                        if v.error_code != 0 {
-                            println!("Got error code {}", v.error_code);
-                        }
-                        let devices = connected_devices_thread.lock().unwrap();
-                        for (code, handle) in devices.iter() {
-                            if *handle == v.handle {
-                                update_sender.send(LidarUpdate::Data(LidarData{
-                                    code: code.clone(),
-                                    timestamp: v.timestamp as u64,
-                                    points: v.points,
-                                })).unwrap();
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                    }
-                }
                 match broadcast_receiver.try_recv() {
                     Ok(v) => {
-                        //println!("Broadcast: {:?}", v);
                         let code = String::from_utf8(v.broadcast_code.to_vec()).unwrap();
-                        let devices = connected_devices_thread.lock().unwrap();
-                        if !devices.contains_key(&code) {
-                            update_sender.send(LidarUpdate::Broadcast(code)).unwrap();
-                        }
-                    }
-                    Err(_) => {
-                        //
-                    }
-                }
-                match device_state_receiver.try_recv() {
-                    Ok(v) => {
-                        println!("Dev state: {:?}", v);
-                        let code = String::from_utf8(v.0.broadcast_code.to_vec()).unwrap();
-                        update_sender.send(LidarUpdate::StateChange(LidarDevice{code: code, state: v.0.state})).unwrap();
+                        let mut devices = known_devices_thread.lock().unwrap();
+                        devices.insert(code.clone(), false);
                     }
                     Err(_) => {
                         //
@@ -387,51 +460,28 @@ impl Sdk {
         return Ok((Sdk{
             handle: Some(handle),
             kill: kill_sender,
-            connected_devices: connected_devices,
+            known_devices: known_devices,
         }, update_receiver));
     }
 
-    pub fn connect(&mut self, code: String) {
+    /// Connects to the given device, returning a Device object.
+    pub fn connect(&mut self, code: String) -> Result<Device, ()> {
+        // @TODO: Check whether the device is already in connected_devices
+
         let mut handle: u8 = 0;
         let res = unsafe { AddLidarToConnect(&(&code).as_bytes()[0] as *const u8, &mut handle as *mut u8) };
         // @TODO: Check res
         println!("Handle: {}", handle);
         println!("Add lidar res = {}", res);
 
-        let mut devices = self.connected_devices.lock().unwrap();
-        devices.insert(code, handle);
+        Ok(Device {
+            code: code,
+            handle: handle,
+        })
     }
 
-    pub fn set_mode(&mut self, code: String, mode: LidarMode) {
-        let devices = self.connected_devices.lock().unwrap();
-        match devices.get(&code) {
-            Some(handle) => {
-                let res = unsafe { LidarSetMode(*handle, mode, common_command_cb, 0 as *mut u8) };
-                // @TODO: Check the result
-            }
-            None => {
-                panic!("Called set_mode on code {} which doesn't exist", code);
-            }
-        }
-    }
-
-    pub fn start_sampling(&mut self, code: String) {
-        let devices = self.connected_devices.lock().unwrap();
-        match devices.get(&code) {
-            Some(handle) => {
-                unsafe {
-                    SetDataCallback(*handle, data_cb);
-                    LidarStartSampling(*handle, common_command_cb, 0 as *mut u8);
-                }
-            }
-            None => {
-                panic!("Called start_sampling on code {} which isn't connected", code);
-            }
-        }
-    }
-
-    pub fn list_connected_devices(&self) -> Vec<String> {
-        let devices = self.connected_devices.lock().unwrap();
+    pub fn list_known_devices(&self) -> Vec<String> {
+        let devices = self.known_devices.lock().unwrap();
         let mut v = vec!();
         for (code, _) in devices.iter() {
             v.push(code.clone());
@@ -454,6 +504,5 @@ impl Drop for Sdk {
         }
 
         *BROADCAST_PIPE.lock().unwrap() = None;
-        *DEVICE_STATE_PIPE.lock().unwrap() = None;
     }
 }
