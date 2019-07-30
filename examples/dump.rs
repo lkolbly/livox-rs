@@ -4,9 +4,13 @@ use las::point::Format;
 use std::io::BufWriter;
 use std::fs::File;
 
+use std::io::Write;
+use std::io::Seek;
+use std::fmt::Debug;
+
 use livox::{Sdk, LidarUpdate, LidarState, LidarMode, DataPoint, LidarStateMask};
 
-fn save_points(points: Vec<DataPoint>, las_writer: &mut Writer<BufWriter<File>>) {
+fn save_points<T: Write + Seek + Debug>(points: Vec<DataPoint>, las_writer: &mut Writer<T>) {
     for point in points.iter() {
     match point {
         DataPoint::Spherical(p) => {

@@ -5,20 +5,25 @@ use std::thread::JoinHandle;
 use std::collections::HashMap;
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::Cursor;
+use livox_sys;
+use num_traits::{FromPrimitive, ToPrimitive};
+
+#[macro_use]
+extern crate num_derive;
 
 #[macro_use]
 extern crate lazy_static;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct BroadcastDeviceInfo {
-    broadcast_code: [u8; 16],
-    dev_type: u8,
-    rsvd: u16,
+#[derive(Debug, Clone, Copy, PartialEq, FromPrimitive, ToPrimitive)]
+pub enum LidarMode {
+    LidarModeNormal = 1,
+    LidarModePowerSaving = 2,
+    LidarModeStandby = 3,
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, FromPrimitive, ToPrimitive)]
 pub enum LidarState {
     LidarStateInit = 0,
     LidarStateNormal = 1,
@@ -39,81 +44,11 @@ pub enum LidarStateMask {
     Any = 0x1F,
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-enum LidarFeature {
-    LidarFeatureNone = 0,
-    LidarFeatureRainFog = 1,
-}
-
-#[repr(C, packed)]
-#[derive(Debug, Clone, Copy)]
-struct DeviceInfo {
-    broadcast_code: [u8; 16],
-    handle: u8,
-    slot: u8,
-    id: u8,
-    //rsvd: u8,
-    device_type: u32,
-    data_port: u16,
-    cmd_port: u16,
-    ip: [u8; 16],
-    state: LidarState,
-    feature: LidarFeature,
-    status: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-enum DeviceEvent {
-    EventConnect = 0,
-    EventDisconnect = 1,
-    EventStateChange = 2,
-}
-
-#[repr(C)]
-struct LivoxEthPacket {
-    version: u8,
-    slot: u8,
-    id: u8,
-    rsvd: u8,
-    err_code: u32,
-    timestamp_type: u8,
-    data_type: u8,
-    timestamp: [u8; 8],
-    data: [u8; 1], // This is of varying size
-}
-
-#[repr(C)]
-pub enum LidarMode {
-    LidarModeNormal = 1,
-    LidarModePowerSaving = 2,
-    LidarModeStandby = 3,
-}
-
-type CommonCommandCallback = extern fn(u8, u8, u8, *mut u8);
-
-#[link(name = "livox_sdk_static", kind = "static")]
-extern {
-    fn Init() -> bool;
-    fn Start() -> bool;
-    fn Uninit();
-
-    fn SetBroadcastCallback(cb: extern fn(*const BroadcastDeviceInfo));
-    fn SetDeviceStateUpdateCallback(cb: extern fn(*const DeviceInfo, DeviceEvent));
-    fn AddLidarToConnect(broadcast_code: *const u8, handle: *mut u8) -> u8;
-    //fn GetConnectedDevices(devices: *mut DeviceInfo, size: *mut u8) -> u8;
-    fn SetDataCallback(handle: u8, cb: extern fn(u8, *const LivoxEthPacket, u32));
-    fn LidarStartSampling(handle: u8, cb: CommonCommandCallback, client_data: *mut u8) -> u8;
-    fn LidarStopSampling(handle: u8, cb: CommonCommandCallback, client_data: *mut u8) -> u8;
-    fn LidarSetMode(handle: u8, mode: LidarMode, cb: CommonCommandCallback, client_data: *mut u8) -> u8;
-}
-
 lazy_static! {
-    static ref BROADCAST_PIPE: Mutex<Option<Sender<BroadcastDeviceInfo>>> = Mutex::new(None);
+    static ref BROADCAST_PIPE: Mutex<Option<Sender<livox_sys::BroadcastDeviceInfo>>> = Mutex::new(None);
 }
 
-extern fn broadcast_cb(devinfo: *const BroadcastDeviceInfo) {
+extern fn broadcast_cb(devinfo: *const livox_sys::BroadcastDeviceInfo) {
     let maybe_sender = BROADCAST_PIPE.lock().unwrap();
     match &*maybe_sender {
         Some(sender) => {
@@ -130,11 +65,14 @@ lazy_static! {
     static ref DEVICE_STATES: Mutex<HashMap<u8, LidarState>> = Mutex::new(HashMap::new());
 }
 
-extern fn device_state_update_cb(devinfo: *const DeviceInfo, event: DeviceEvent) {
+extern fn device_state_update_cb(devinfo: *const livox_sys::DeviceInfo, event: livox_sys::DeviceEvent) {
     let devinfo = unsafe { (*devinfo).clone() };
     (*DEVICE_STATES.lock().unwrap()).insert(
         devinfo.handle,
-        devinfo.state,
+        match LidarState::from_u32(devinfo.state) {
+            Some(x) => { x },
+            None => { println!("Got state {}", devinfo.state); LidarState::LidarStateUnknown },
+        },
     );
 }
 
@@ -209,15 +147,11 @@ fn parse_timestamp(data: &[u8]) -> u64 {
     val
 }
 
-/*lazy_static! {
-    static ref DATA_PIPE: Mutex<Option<Sender<DataPacket>>> = Mutex::new(None);
-}*/
-
 lazy_static! {
     static ref DATA_PIPES: Mutex<HashMap<u8, Sender<DataPacket>>> = Mutex::new(HashMap::new());
 }
 
-extern fn data_cb(handle: u8, data: *const LivoxEthPacket, data_size: u32) {
+extern fn data_cb(handle: u8, data: *mut livox_sys::LivoxEthPacket, data_size: u32, user_data: *mut std::ffi::c_void) {
     //match &*DATA_PIPE.lock().unwrap() {
     match &(*DATA_PIPES.lock().unwrap()).get(&handle) {
         Some(sender) => {
@@ -262,7 +196,7 @@ extern fn data_cb(handle: u8, data: *const LivoxEthPacket, data_size: u32) {
     }
 }
 
-extern fn common_command_cb(status: u8, handle: u8, response: u8, _client_data: *mut u8) {
+extern fn common_command_cb(status: u8, handle: u8, response: u8, _client_data: *mut std::ffi::c_void) {
     println!("Command callback says: status={}, handle={}, response={}", status, handle, response);
 }
 
@@ -299,8 +233,8 @@ impl DataStream {
             sender,
         );
         unsafe {
-            SetDataCallback(handle, data_cb);
-            LidarStartSampling(handle, common_command_cb, 0 as *mut u8);
+            livox_sys::SetDataCallback(handle, Some(data_cb), 0 as *mut std::ffi::c_void);
+            livox_sys::LidarStartSampling(handle, Some(common_command_cb), 0 as *mut std::ffi::c_void);
         }
         Ok(DataStream{
             handle: handle,
@@ -330,7 +264,7 @@ impl Iterator for DataStream {
 impl Drop for DataStream {
     fn drop(&mut self) {
         unsafe {
-            LidarStopSampling(self.handle, common_command_cb, 0 as *mut u8);
+            livox_sys::LidarStopSampling(self.handle, Some(common_command_cb), 0 as *mut std::ffi::c_void);
         }
 
         (*DATA_PIPES.lock().unwrap()).remove(&self.handle);
@@ -348,6 +282,7 @@ impl Device {
         (*DEVICE_STATES.lock().unwrap()).insert(
             handle,
             LidarState::LidarStateUnknown,
+            //livox_sys::LidarState_kLidarStateUnknown,
         );
         Ok(Device{
             code: code,
@@ -364,6 +299,7 @@ impl Device {
                 Some(state) => { state.clone() },
                 None => { LidarState::LidarStateUnknown },
             };
+            // @TODO: Make this check a method on LidarStateMask
             if state_mask as u32 & (1 << (state) as u32) != 0 {
                 break;
             }
@@ -373,7 +309,7 @@ impl Device {
     /// Sends a command to set the mode of the device. The device state may not
     /// instantaneously change, be sure to call wait_for_state after calling.
     pub fn set_mode(&mut self, mode: LidarMode) {
-        let res = unsafe { LidarSetMode(self.handle, mode, common_command_cb, 0 as *mut u8) };
+        let res = unsafe { livox_sys::LidarSetMode(self.handle, mode.to_u32().unwrap(), Some(common_command_cb), 0 as *mut std::ffi::c_void) };
         // @TODO: Check the result
     }
 
@@ -410,7 +346,7 @@ impl Sdk {
             None => {}
         }
 
-        let result = unsafe { Init() };
+        let result = unsafe { livox_sys::Init() };
         if !result {
             return Err(());
         }
@@ -419,8 +355,8 @@ impl Sdk {
         *BROADCAST_PIPE.lock().unwrap() = Some(sender);
 
         unsafe {
-            SetBroadcastCallback(broadcast_cb);
-            SetDeviceStateUpdateCallback(device_state_update_cb);
+            livox_sys::SetBroadcastCallback(Some(broadcast_cb));
+            livox_sys::SetDeviceStateUpdateCallback(Some(device_state_update_cb));
         }
 
         // Spin up a thread to process broadcasts and state changes
@@ -434,7 +370,11 @@ impl Sdk {
             loop {
                 match broadcast_receiver.try_recv() {
                     Ok(v) => {
-                        let code = String::from_utf8(v.broadcast_code.to_vec()).unwrap();
+                        let mut v2 = vec!();
+                        for c in v.broadcast_code.iter() {
+                            v2.push(*c as u8);
+                        }
+                        let code = String::from_utf8(v2).unwrap();
                         let mut devices = known_devices_thread.lock().unwrap();
                         devices.insert(code.clone(), false);
                     }
@@ -454,7 +394,7 @@ impl Sdk {
         });
 
         unsafe {
-            Start();
+            livox_sys::Start();
         }
 
         return Ok((Sdk{
@@ -469,15 +409,17 @@ impl Sdk {
         // @TODO: Check whether the device is already in connected_devices
 
         let mut handle: u8 = 0;
-        let res = unsafe { AddLidarToConnect(&(&code).as_bytes()[0] as *const u8, &mut handle as *mut u8) };
+        let bytes_u8 = (&code).as_bytes();
+        let mut bytes_i8 = vec!();
+        for b in bytes_u8.iter() {
+            bytes_i8.push(*b as i8);
+        }
+        let res = unsafe { livox_sys::AddLidarToConnect(&bytes_i8[0] as *const i8, &mut handle as *mut u8) };
         // @TODO: Check res
         println!("Handle: {}", handle);
         println!("Add lidar res = {}", res);
 
-        Ok(Device {
-            code: code,
-            handle: handle,
-        })
+        Device::new(code, handle)
     }
 
     pub fn list_known_devices(&self) -> Vec<String> {
@@ -494,7 +436,7 @@ impl Drop for Sdk {
     /// Un-inits the Livox SDK and kills all threads.
     fn drop(&mut self) {
         unsafe {
-            Uninit();
+            livox_sys::Uninit();
         }
 
         // Kill the thread
