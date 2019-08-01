@@ -8,12 +8,12 @@ edition = "2018"
 
 [dependencies]
 #libc = "0.2.0"
-livox-sys = { path = "/home/lane/Downloads/livox-sys/" }
+livox-sys = "0.1.0"
 byteorder = "1.3.1"
 lazy_static = "1.3.0"
 num-traits = "0.2.0"
 num-derive = "0.2.5"
 
 [dev-dependencies]
-las = "0.6.2"
+las = { path = "/home/lane/Downloads/las-rs" }
 palette = "0.4"
