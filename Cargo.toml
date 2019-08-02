@@ -15,5 +15,9 @@ num-traits = "0.2.0"
 num-derive = "0.2.5"
 
 [dev-dependencies]
-las = { path = "/home/lane/Downloads/las-rs" }
 palette = "0.4"
+chrono = "0.4.7"
+
+[dev-dependencies.las]
+path = "/home/lane/Downloads/las-rs"
+features = ["laz"]

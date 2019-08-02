@@ -25,6 +25,7 @@ pub enum DataPoint {
 
 pub struct DataPacket {
     pub timestamp: u64,
+    pub ptp_sync: bool,
     pub points: Vec<DataPoint>,
 }
 
@@ -80,8 +81,8 @@ impl From<(*mut livox_sys::LivoxEthPacket, u32)> for DataPacket {
         if version != 5 {
             panic!("Unknown data version {} encountered", version);
         }
-        let time = if timestamp_type == 0 {
-            // Nanoseconds, unsync'd
+        let time = if timestamp_type == 0 || timestamp_type == 1 {
+            // Nanoseconds, unsync'd or PTP
             parse_timestamp(&timestamp)
         } else {
             panic!("Unknown timestamp type {}", timestamp_type);
@@ -91,6 +92,7 @@ impl From<(*mut livox_sys::LivoxEthPacket, u32)> for DataPacket {
             //handle: handle,
             //error_code: err_code,
             timestamp: time,
+            ptp_sync: timestamp_type == 1,
             points: vec!(),
         };
         if data_type == 0 {
@@ -110,7 +112,7 @@ impl From<(*mut livox_sys::LivoxEthPacket, u32)> for DataPacket {
 fn parse_timestamp(data: &[u8]) -> u64 {
     let mut val = 0;
     for i in 0..8 {
-        val = val * 256 + data[i] as u64;
+        val = val * 256 + data[7-i] as u64;
     }
     val
 }

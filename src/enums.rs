@@ -27,3 +27,8 @@ pub enum LidarStateMask {
     Unknown = 32,
     Any = 0x1F,
 }
+
+pub enum CoordinateSystem {
+    Cartesian,
+    Spherical,
+}

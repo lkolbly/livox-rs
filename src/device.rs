@@ -103,4 +103,17 @@ impl Device {
         let ds = DataStream::new(self.handle)?;
         Ok(ds)
     }
+
+    pub fn set_coordinate_system(&mut self, system: CoordinateSystem) -> Result<(), ()> {
+        let res = match system {
+            CoordinateSystem::Cartesian => {
+                unsafe { livox_sys::SetCartesianCoordinate(self.handle, Some(common_command_cb), 0 as *mut std::ffi::c_void) }
+            }
+            CoordinateSystem::Spherical => {
+                unsafe { livox_sys::SetSphericalCoordinate(self.handle, Some(common_command_cb), 0 as *mut std::ffi::c_void) }
+            }
+        };
+        // @TODO: Check the result
+        Ok(())
+    }
 }
