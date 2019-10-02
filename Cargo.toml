@@ -1,5 +1,7 @@
 [package]
 name = "livox"
+description = "An (unofficial) library to pull data from Livox devices"
+license = "MIT"
 version = "0.1.0"
 authors = ["Lane Kolbly <lane@rscheme.org>"]
 edition = "2018"
