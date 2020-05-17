@@ -57,6 +57,6 @@ pub extern fn data_cb(handle: u8, data: *mut livox_sys::LivoxEthPacket, data_siz
     }
 }
 
-pub extern fn common_command_cb(status: u8, handle: u8, response: u8, _client_data: *mut std::ffi::c_void) {
+pub extern fn common_command_cb(status: i32, handle: u8, response: u8, _client_data: *mut std::ffi::c_void) {
     println!("Command callback says: status={}, handle={}, response={}", status, handle, response);
 }

@@ -2,8 +2,8 @@
 
 [![Livox on Travis CI][travis-image]][travis]
 
-[travis-image]: https://api.travis-ci.com/lkolbly/livox.svg?branch=master
-[travis]: https://travis-ci.com/lkolbly/livox
+[travis-image]: https://api.travis-ci.com/lkolbly/livox-rs.svg?branch=master
+[travis]: https://travis-ci.com/lkolbly/livox-rs
 
 A Rust library for streaming data from Livox LiDAR devices
 

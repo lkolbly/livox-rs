@@ -102,11 +102,7 @@ impl Sdk {
 
         let mut handle: u8 = 0;
         let bytes_u8 = (&code).as_bytes();
-        let mut bytes_i8 = vec!();
-        for b in bytes_u8.iter() {
-            bytes_i8.push(*b as i8);
-        }
-        let res = unsafe { livox_sys::AddLidarToConnect(&bytes_i8[0] as *const i8, &mut handle as *mut u8) };
+        let res = unsafe { livox_sys::AddLidarToConnect(&bytes_u8[0] as *const u8, &mut handle as *mut u8) };
         // @TODO: Check res
         println!("Handle: {}", handle);
         println!("Add lidar res = {}", res);
