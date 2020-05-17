@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::collections::HashMap;
+use std::ffi::CString;
 use livox_sys;
 use crate::callbacks::*;
 use crate::device::*;
@@ -101,8 +102,8 @@ impl Sdk {
         // @TODO: Check whether the device is already in connected_devices
 
         let mut handle: u8 = 0;
-        let bytes_u8 = (&code).as_bytes();
-        let res = unsafe { livox_sys::AddLidarToConnect(&bytes_u8[0] as *const u8, &mut handle as *mut u8) };
+        let bytes = CString::new(code).expect("CString::new failed");
+        let res = unsafe { livox_sys::AddLidarToConnect(bytes.as_ptr(), &mut handle as *mut u8) };
         // @TODO: Check res
         println!("Handle: {}", handle);
         println!("Add lidar res = {}", res);
